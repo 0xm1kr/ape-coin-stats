@@ -1,0 +1,20 @@
+{
+  "name": "nodejs-sandbox",
+  "type": "module",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.html",
+  "scripts": {
+    "start": "nodemon index.js"
+  },
+  "keywords": [],
+  "author": "Mike Roth<mike@cr3labs.com>",
+  "license": "MIT",
+  "devDependencies": {
+    "nodemon": "^2.0.20"
+  },
+  "dependencies": {
+    "ethers": "^6.6.0",
+    "fs-extra": "^11.1.1"
+  }
+}
