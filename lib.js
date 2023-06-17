@@ -1,9 +1,17 @@
 import { WebSocketProvider, Contract } from "ethers";
 import path from "path";
+import readline from 'readline';
 import fs from "fs-extra";
+import pLimit from 'p-limit';
+import { EOL } from 'os';
 
 export const APECOIN_STAKING_ADDRESS =
   "0x5954ab967bc958940b7eb73ee84797dc8a2afbb9";
+
+// BigInt JSON support
+BigInt.prototype.toJSON = function () {
+  return this.toString();
+};
 
 /**
  * Load a JSON file
@@ -18,6 +26,31 @@ export async function loadJSON(filename, options) {
 }
 
 /**
+ * Load a large jsonLd log file
+ * @param {*} filename 
+ */
+export function loadJsonLd(filename) {
+  return new Promise((resolve) => {
+    const results = [];
+
+    // read log file
+    const rl = readline.createInterface({
+      input: fs.createReadStream(path.join(process.cwd(), `/output/`, filename)),
+      crlfDelay: Infinity
+    });
+
+    rl.on('line', async (line) => {
+      // convert to json
+      const parsed = JSON.parse(line.replace(EOL, ''));
+      // handle row
+      results.push(parsed);
+    });
+
+    rl.on('close', () => resolve(results));
+  });
+}
+
+/**
  * Write a file to `/.out`.
  * @param {string} filename
  * @param {*} data
@@ -25,7 +58,7 @@ export async function loadJSON(filename, options) {
  */
 export async function persistOutput(filename, data, options) {
   await fs.outputFile(
-    path.join(process.cwd(), `output`, filename),
+    path.join(process.cwd(), `/output/`, filename),
     data,
     options
   );
@@ -89,6 +122,7 @@ export async function queryLogs(
   eBlock
 ) {
   // backfill logs
+  const CONCURRENCY = 100; // TODO can change if this returns too many logs at once
   const DEPLOY_BLOCK = sBlock || 14400533;
   const END_BLOCK = eBlock || (await provider.getBlockNumber());
 
@@ -102,33 +136,99 @@ export async function queryLogs(
       : contract.filters[filter]();
 
   let startBlock = DEPLOY_BLOCK;
-  let events = [];
-  while (startBlock <= END_BLOCK) {
-    // deploy block
-    const filtered = await contract.queryFilter(f, startBlock, startBlock + 75);
-
-    // NOTE: o(n)^2 :(
-    // for (let i = 0; i < filtered.length; i++) {
-    // fix annoying ethers args array
-    // if (filtered[i].args) {
-    //   filtered[i].args = Object.assign(
-    //     ...Object.keys(filtered[i]?.args || {})
-    //       .map((k) => {
-    //         if (Number.isNaN(Number(k))) {
-    //           return { [k]: filtered[i].args[k] };
-    //         }
-    //         return null;
-    //       })
-    //       .filter((l) => l)
-    //   );
-    // }
-    // }
-    events = events.concat(filtered);
-    startBlock = startBlock + 100;
-    console.log(startBlock, ` - ${label}:`, events.length, "events");
+  let requests = [];
+  
+  const doRequest = (startBlock, endBlock) => {
+    return async () => {
+      console.log(`${label} - `, 'retrieving logs: ', startBlock, 'to', endBlock);
+      const formatted = [];
+      let filtered = await contract.queryFilter(f, startBlock, endBlock);
+      // format logs for JSON parsing
+      for (let i = 0; i < filtered.length; i++) {
+        formatted.push({
+          blockNumber: filtered[i].blockNumber,
+          blockHash: filtered[i].blockHash,
+          transactionIndex: filtered[i].transactionIndex,
+          removed: filtered[i].removed,
+          address: filtered[i].address,
+          data: filtered[i].data,
+          topics: filtered[i].topics,
+          transactionHash: filtered[i].transactionHash,
+          logIndex: filtered[i].logIndex,
+          args: filtered[i].args.map(a => a),
+          fragment: JSON.parse(filtered[i].fragment.format('json'))
+        });
+      }
+      console.log(`${label} - `, 'found', formatted.length, 'logs in blocks', startBlock, 'to', endBlock);
+      return formatted;
+    };
   }
 
-  await persistOutput(`${label}_events.json`, JSON.stringify(events, null, 2));
+  while (startBlock <= END_BLOCK) {
+    requests.push(doRequest(startBlock, startBlock + CONCURRENCY));
+    startBlock = startBlock + CONCURRENCY + 1;
+  }
 
-  return events;
+  // Limit concurrency of RPC requests
+  console.log('running', requests.length, `requests, max of ${CONCURRENCY} at a time...`);
+  const limit = pLimit(CONCURRENCY);
+  requests = requests.map((doRequest) => limit(() => doRequest()));
+  const settled = await Promise.allSettled(requests);
+  console.log('completed', settled.length, 'requests');
+
+  // flatten & persist results
+  const results = settled.map(s => s.value).flat();
+  const stream = fs.createWriteStream(path.join(process.cwd(), `/output/`, `${label}_events.jsonld`), {flags:'a'});
+  results.forEach(r => stream.write(JSON.stringify(r) + '\n'));
+  stream.end();
+
+  // return results
+  return results;
+}
+
+/**
+ * Get logs for a specific filter
+ * @param {array} requests { method: string, args: array }[]
+ * @param {array} args 
+ * @param {string} address 
+ * @param {string} ABI 
+ * @param {object} provider 
+ */
+export async function bulkCallContract(
+  label,
+  calls,
+  address,
+  ABI,
+  provider
+) {
+  const CONCURRENCY = 100;
+
+  // init contract
+  const contract = new Contract(address, ABI, provider);
+
+  const doRequest = (method, args) => {
+    return async () => {
+      console.log(`${label} - `, 'calling', method, 'with args', args);
+      const result = await contract[method](...args);
+      return {
+        method,
+        args,
+        result
+      };
+    };
+  }
+
+  
+  const limit = pLimit(CONCURRENCY);
+  let requests = calls.map(c => doRequest(c.method, c.args));
+  console.log('running', requests.length, `requests, max of ${CONCURRENCY} at a time...`);
+  requests = requests.map((doRequest) => limit(() => doRequest()));
+  const settled = await Promise.allSettled(requests);
+  console.log('completed', settled.length, 'RPC requests');
+
+  // flatten & persist results
+  const results = settled.map(s => s.value);
+  await persistOutput(`${label}_contract_calls.json`, JSON.stringify(results, null, 2));
+
+  return results;
 }
