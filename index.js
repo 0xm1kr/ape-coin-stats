@@ -11,12 +11,12 @@ import {
 
 // NOTE: change this to the lastest block # in the 
 // output + 1 in order to do incremental updates.
-// const START_BLOCK = 16119150; // ApeCoin staking contract deploy block
-const START_BLOCK = 17498230; // recent block
+const START_BLOCK = 16119150; // ApeCoin staking contract deploy block
+// const START_BLOCK = 17498230; // recent block
 
 // -----------------------------------------------------------------
 
-// Run Code
+// Run
 (async () => {
   const { ws /* wallet, oss, rsvr */ } = initProviders();
 
@@ -55,8 +55,8 @@ const START_BLOCK = 17498230; // recent block
     // DashboardStake(APECOIN_POOL_ID, tokenId, deposited, unclaimed, rewards24Hrs, NULL_PAIR)[];
     return !!s.result.find(s => (s[2] !== '0'));
   });
-
   console.log('found', balances.length, 'wallets with staked balances.');
   
+  // save the final wallet staking data
   await persistOutput('ApeCoin_staking_wallets.json', JSON.stringify(balances, null, 2));
 })();
